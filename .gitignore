@@ -1,5 +1,7 @@
 .DS_Store
 venv/
+.venv/
 logs/
 __pycache__/
 *.pyc
+/dist/

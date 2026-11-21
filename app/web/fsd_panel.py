@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""fsd_panel.py — FSD 拦截实况看板（纯服务端渲染，无 JavaScript，默认 127.0.0.1:8900）
+r"""fsd_panel.py — FSD 拦截实况看板（纯服务端渲染，无 JavaScript，默认 127.0.0.1:8900）
 
 设计要点：
   * 页面不含任何 <script>：老浏览器（IE/旧 Edge）不会弹"脚本错误"对话框
@@ -17,7 +17,10 @@ import html
 import json
 import os
 import re
+import shutil
+import socket
 import subprocess
+import sys
 import time
 from collections import Counter
 from datetime import datetime
@@ -33,9 +36,24 @@ HSLOG = os.path.join(LOGS, "handshake.log")
 CARREC = os.path.join(LOGS, "car_recent.jsonl")   # 车机请求滚动缓存（最多 999 条）
 CAR_CAP = 999
 PAYLOAD = os.path.join(ROOT, "payload.json")
-CAR_IP = "192.168.199.95"
-CAR_MAC = "4C:FC:AA:00:00:00"
-LOCAL_IPS = {"127.0.0.1", "192.168.199.148", "192.168.137.1"}
+CAR_IP = os.environ.get("FSD_CAR_IP", "192.168.199.95")
+CAR_MAC = os.environ.get("FSD_CAR_MAC", "4C:FC:AA:00:00:00")
+HTTPS_PORT = int(os.environ.get("FSD_HTTPS_PORT", "443"))
+
+
+def _local_ips() -> set[str]:
+    ips = {"127.0.0.1", "::1"}
+    ips.update(ip.strip() for ip in os.environ.get("FSD_LOCAL_IPS", "").split(",") if ip.strip())
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.connect(("223.5.5.5", 53))
+            ips.add(sock.getsockname()[0])
+    except OSError:
+        pass
+    return ips
+
+
+LOCAL_IPS = {"192.168.199.148", "192.168.137.1"} | _local_ips()
 
 app = Flask(__name__)
 
@@ -265,21 +283,41 @@ def _tcp_conns() -> list:
     if now - _CONN_CACHE["ts"] < 3.0:
         return _CONN_CACHE["rows"]
     out = []
+    if os.name == "nt":
+        command = ["netstat", "-ano", "-p", "TCP"]
+    elif sys.platform.startswith("linux") and shutil.which("ss"):
+        command = ["ss", "-nt"]
+    elif sys.platform == "darwin":
+        command = ["netstat", "-an", "-p", "tcp"]
+    else:
+        command = ["netstat", "-nt"]
     try:
-        raw = subprocess.run(["netstat", "-ano", "-p", "TCP"],
-                             capture_output=True, text=True, timeout=5,
+        raw = subprocess.run(command, capture_output=True, text=True, timeout=5,
                              creationflags=_NO_WIN).stdout
     except Exception:  # noqa: BLE001
         return out
     for line in raw.splitlines():
         parts = line.split()
-        if len(parts) < 5 or parts[0].upper() != "TCP":
+        if command[0] == "ss":
+            if len(parts) < 5:
+                continue
+            state, local, remote = parts[0], parts[3], parts[4]
+        elif os.name == "nt":
+            if len(parts) < 5 or parts[0].upper() != "TCP":
+                continue
+            local, remote, state = parts[1], parts[2], parts[3]
+        else:
+            if len(parts) < 5 or not parts[0].lower().startswith("tcp"):
+                continue
+            local, remote, state = parts[3], parts[4], parts[-1]
+        if (not local.endswith((f":{HTTPS_PORT}", f".{HTTPS_PORT}"))
+                or remote.startswith(("0.0.0.0", "[::", "*"))):
             continue
-        local, remote, state = parts[1], parts[2], parts[3]
-        if not local.endswith(":443") or remote.startswith("0.0.0.0") or remote.startswith("[::"):
+        endpoint = remote.rsplit(":", 1) if ":" in remote else remote.rsplit(".", 1)
+        if len(endpoint) != 2:
             continue
-        host = remote.rsplit(":", 1)[0].strip("[]")
-        out.append({"remote": host, "port": remote.rsplit(":", 1)[-1],
+        host, remote_port = endpoint[0].strip("[]"), endpoint[1]
+        out.append({"remote": host, "port": remote_port,
                     "state": state, "car": host == CAR_IP})
     _CONN_CACHE["ts"] = now
     _CONN_CACHE["rows"] = out
@@ -318,7 +356,13 @@ def _l2_alive(ip: str) -> bool:
         return _PING_CACHE["ok"]
     ok = False
     try:
-        r = subprocess.run(["ping", "-n", "1", "-w", "800", ip],
+        if os.name == "nt":
+            command = ["ping", "-n", "1", "-w", "800", ip]
+        elif sys.platform == "darwin":
+            command = ["ping", "-c", "1", "-W", "1000", ip]
+        else:
+            command = ["ping", "-c", "1", "-W", "1", ip]
+        r = subprocess.run(command,
                            capture_output=True, text=True, timeout=4,
                            creationflags=_NO_WIN)
         ok = r.returncode == 0
@@ -385,7 +429,7 @@ def car_state(hits: list, dns: list) -> dict:
     online = bool(idle is not None and idle < 180)
     return {
         "online": online,
-        "l2": _l2_alive("192.168.199.95"),
+        "l2": _l2_alive(CAR_IP) if CAR_IP else False,
         "idle": int(idle) if idle is not None else None,
         "last": last.strftime("%H:%M:%S") if last else None,
         "last_http": lh.strftime("%H:%M:%S") if lh else None,
@@ -734,12 +778,31 @@ def api_state():
 
 
 def main() -> int:
+    global CAR_IP, CAR_MAC, HTTPS_PORT
     ap = argparse.ArgumentParser()
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=8900)
+    ap.add_argument("--https-port", type=int, default=HTTPS_PORT)
+    ap.add_argument("--car-ip", default=CAR_IP)
+    ap.add_argument("--car-mac", default=CAR_MAC)
     args = ap.parse_args()
+    CAR_IP, CAR_MAC, HTTPS_PORT = args.car_ip, args.car_mac, args.https_port
     print("[fsd_panel] http://%s:%d  logs=%s" % (args.host, args.port, LOGS), flush=True)
-    app.run(host=args.host, port=args.port, threaded=True, debug=False, use_reloader=False)
+    if sys.platform == "darwin":
+        from socketserver import TCPServer
+        from werkzeug.serving import ThreadedWSGIServer
+
+        class MacOSWSGIServer(ThreadedWSGIServer):
+            def server_bind(self):
+                TCPServer.server_bind(self)
+                self.server_name = self.server_address[0]
+                self.server_port = self.server_address[1]
+
+        server = MacOSWSGIServer(args.host, args.port, app)
+        server.log_startup()
+        server.serve_forever()
+    else:
+        app.run(host=args.host, port=args.port, threaded=True, debug=False, use_reloader=False)
     return 0
 
 

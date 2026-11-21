@@ -79,12 +79,14 @@ def build_nxdomain(query: bytes, qend: int) -> bytes:
 
 
 class DnsSink:
-    def __init__(self, ip: str, redirect: set[str], upstream: list[str], port: int, log_path: str):
+    def __init__(self, ip: str, redirect: set[str], upstream: list[str], port: int,
+                 bind: str, log_path: str):
         self.ip = ip
         self.redirect = redirect
         self.health_name = os.environ.get("FSD_DNS_HEALTH_NAME")
         self.upstream = upstream
         self.port = port
+        self.bind = bind
         self.log_path = log_path
         self.count = 0
 
@@ -151,8 +153,8 @@ class DnsSink:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
-        sock.bind(("0.0.0.0", self.port))
-        print(f"[dns] listening udp/{self.port} | {self.ip} <- {sorted(self.redirect)} | upstream={self.upstream}", flush=True)
+        sock.bind((self.bind, self.port))
+        print(f"[dns] listening udp/{self.bind}:{self.port} | {self.ip} <- {sorted(self.redirect)} | upstream={self.upstream}", flush=True)
         for _ in range(4):
             threading.Thread(target=self.handle, args=(sock,), daemon=True).start()
         while True:
@@ -165,6 +167,7 @@ def main() -> None:
     ap.add_argument("--redirect", action="append", default=None, help="要劫持的域名，可重复")
     ap.add_argument("--upstream", default=None, help="上游 DNS，逗号分隔，默认 223.5.5.5,1.1.1.1")
     ap.add_argument("--port", type=int, default=53)
+    ap.add_argument("--bind", default="0.0.0.0", help="DNS 监听地址，默认所有 IPv4 网卡")
     ap.add_argument("--log", default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs", "dns.jsonl"))
     ap.add_argument("--no-forward", action="store_true", help="非劫持域名一律 NXDOMAIN（不建议）")
     args = ap.parse_args()
@@ -172,7 +175,7 @@ def main() -> None:
     redirect = {d.rstrip(".").lower() for d in (args.redirect or ["mothership.vn.teslamotors.com"])}
     upstream = [u.strip() for u in (args.upstream or "223.5.5.5,1.1.1.1").split(",") if u.strip()]
     os.makedirs(os.path.dirname(args.log), exist_ok=True)
-    DnsSink(args.ip, redirect, upstream, args.port, args.log).run()
+    DnsSink(args.ip, redirect, upstream, args.port, args.bind, args.log).run()
 
 
 if __name__ == "__main__":

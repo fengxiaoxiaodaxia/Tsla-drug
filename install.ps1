@@ -224,7 +224,9 @@ if ($Check) {
         @{ N = 'web\fsd_panel.py';  P = (Join-Path $Target 'web\fsd_panel.py') }
     )
     foreach ($i in $items) {
-        if (Test-Path $i.P) { Good $i.N } else { Fail $i.N }
+        if (Test-Path $i.P) { Good $i.N }
+        elseif ($i.N -eq 'CA (certs2)') { Note 'CA 文件缺失时会在首次启动 mitmdump 时生成' }
+        else { Fail $i.N }
     }
     # Python 解释器探测：venv 已就绪时不需要系统 Python
     $venvPywCheck = Join-Path $Target 'venv\Scripts\pythonw.exe'
@@ -386,7 +388,9 @@ $checks = @(
     @{ N = 'web\fsd_panel.py';           P = (Join-Path $Target 'web\fsd_panel.py') }
 )
 foreach ($c in $checks) {
-    if (Test-Path $c.P) { Good $c.N } else { Fail $c.N }
+    if (Test-Path $c.P) { Good $c.N }
+    elseif ($c.N -eq 'certs2\mitmproxy-ca.pem') { Note 'CA 文件缺失时会在首次启动 mitmdump 时生成' }
+    else { Fail $c.N }
 }
 if (Test-Path $plTarget) {
     try {

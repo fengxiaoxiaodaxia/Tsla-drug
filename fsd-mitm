@@ -1,0 +1,29 @@
+#!/usr/bin/env sh
+set -eu
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+PYTHON="$ROOT/.venv/bin/python"
+
+usage() {
+    echo "用法：$0 {start --ip <热点接口IPv4>|status|stop} [其他参数]" >&2
+}
+
+if [ ! -x "$PYTHON" ]; then
+    echo "尚未安装依赖，请先运行：$ROOT/install.sh" >&2
+    exit 1
+fi
+
+case "${1:-}" in
+    start|status|stop) ;;
+    *) usage; exit 2 ;;
+esac
+
+if [ "$(id -u)" -eq 0 ]; then
+    exec "$PYTHON" "$ROOT/app/cli.py" "$@"
+fi
+
+if ! command -v sudo >/dev/null 2>&1; then
+    echo "服务需要绑定特权端口，请使用 root 运行此命令。" >&2
+    exit 1
+fi
+exec sudo "$PYTHON" "$ROOT/app/cli.py" "$@"

@@ -1,0 +1,44 @@
+name: Build platform release packages
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Package version label (tag pushes publish a GitHub Release)"
+        required: true
+        default: snapshot
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-python@v7.1.0
+        with:
+          python-version: "3.12"
+      - name: Build Windows, macOS, and Linux archives
+        run: python scripts/package_release.py --version "$RELEASE_VERSION"
+        env:
+          RELEASE_VERSION: ${{ github.ref_type == 'tag' && github.ref_name || inputs.version || format('snapshot-{0}', github.sha) }}
+      - name: Check Unix installer syntax
+        run: sh -n install.sh fsd-mitm
+      - uses: actions/upload-artifact@v7.0.2
+        with:
+          name: tesla-drug-release-packages
+          path: |
+            dist/*.zip
+            dist/*.tar.gz
+          if-no-files-found: error
+      - name: Publish GitHub Release
+        if: github.ref_type == 'tag'
+        run: gh release create "$GITHUB_REF_NAME" dist/* --generate-notes --verify-tag
+        env:
+          GH_TOKEN: ${{ github.token }}
